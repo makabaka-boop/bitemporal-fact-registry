@@ -1,0 +1,15 @@
+# the manpages for those are in the PostgreSQL packages
+postgresql-client-common: binary-without-manpage *usr/bin/clusterdb*
+postgresql-client-common: binary-without-manpage *usr/bin/create*
+postgresql-client-common: binary-without-manpage *usr/bin/drop*
+postgresql-client-common: binary-without-manpage *usr/bin/pg_basebackup*
+postgresql-client-common: binary-without-manpage *usr/bin/pg_dump*
+postgresql-client-common: binary-without-manpage *usr/bin/pg_isready*
+postgresql-client-common: binary-without-manpage *usr/bin/pg_receivewal*
+postgresql-client-common: binary-without-manpage *usr/bin/pg_receivexlog*
+postgresql-client-common: binary-without-manpage *usr/bin/pg_recvlogical*
+postgresql-client-common: binary-without-manpage *usr/bin/pg_restore*
+postgresql-client-common: binary-without-manpage *usr/bin/pgbench*
+postgresql-client-common: binary-without-manpage *usr/bin/psql*
+postgresql-client-common: binary-without-manpage *usr/bin/reindexdb*
+postgresql-client-common: binary-without-manpage *usr/bin/vacuum*

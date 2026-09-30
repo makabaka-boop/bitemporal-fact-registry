@@ -1,0 +1,41 @@
+#!/bin/sh
+
+# Tell apt which PostgreSQL versions have clusters present
+
+set -eu
+
+APTCONFDIR="/etc/apt/apt.conf.d"
+[ -d "$APTCONFDIR" ] || exit 0 # skip generation on RPM systems
+APTCONF="$APTCONFDIR/02autoremove-postgresql"
+TMPCONF="$(mktemp --tmpdir pg_updateaptconfig.XXXXXX)"
+trap "rm -f $TMPCONF" EXIT
+
+cat > $TMPCONF <<EOF
+// DO NOT EDIT!
+// File maintained by /usr/share/postgresql-common/pg_updateaptconfig.
+//
+// Mark all PostgreSQL packages as NeverAutoRemove for which PostgreSQL
+// clusters exist. This is especially important when the "postgresql" meta
+// package changes its dependencies to a new version, which might otherwise
+// trigger the old postgresql-NN package to be automatically removed, rendering
+// the old database cluster inaccessible.
+
+APT
+{
+  NeverAutoRemove
+  {
+EOF
+
+pg_lsclusters -h | cut -d ' ' -f 1 | uniq | while read version; do
+    echo "    \"^postgresql.*-$version\";" >> $TMPCONF
+done
+
+cat >> $TMPCONF <<EOF
+  };
+};
+EOF
+
+if ! cmp --silent $TMPCONF $APTCONF; then
+    cp $TMPCONF $APTCONF
+    chmod 444 $APTCONF
+fi

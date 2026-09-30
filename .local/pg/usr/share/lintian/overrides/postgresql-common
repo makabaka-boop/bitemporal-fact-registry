@@ -1,0 +1,11 @@
+# the manpages for those are in the PostgreSQL packages
+postgresql-common: binary-without-manpage *usr/bin/pg_archivecleanup*
+postgresql-common: binary-without-manpage *usr/bin/pg_config*
+# the init-functions are sourced via /usr/share/postgresql-common/init.d-functions
+postgresql-common: init.d-script-does-not-source-init-functions *etc/init.d/postgresql*
+# pg_receivewal@ is an add-on service of postgresql@
+postgresql-common: systemd-service-file-refers-to-unusual-wantedby-target *lib/systemd/system/pg_receivewal@.service*
+# debian/rules template
+postgresql-common: script-not-executable *usr/share/postgresql-common/server/postgresql.mk*
+# part of the testsuite
+package-contains-documentation-outside-usr-share-doc *usr/share/postgresql-common/t/foo/foo-123/README.md*

@@ -1,0 +1,216 @@
+#!/bin/bash
+
+# Run integration tests (on the installed packages).
+#
+# (C) 2005-2012 Martin Pitt <mpitt@debian.org>
+# (C) 2012-2022 Christoph Berg <myon@debian.org>
+#
+#  This program is free software; you can redistribute it and/or modify
+#  it under the terms of the GNU General Public License as published by
+#  the Free Software Foundation; either version 2 of the License, or
+#  (at your option) any later version.
+#
+#  This program is distributed in the hope that it will be useful,
+#  but WITHOUT ANY WARRANTY; without even the implied warranty of
+#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#  GNU General Public License for more details.
+
+set -eu
+
+# default config
+TESTSDIR="$(dirname $0)/t"
+: ${PG_UMASKS="077"} # default umask(s) to try
+
+help ()
+{
+    echo "postgresql-common testsuite"
+    echo "Syntax: $0 [options] [test ...]"
+    echo "    -D               drop all existing clusters (USE WITH CARE)"
+    echo "    -f number        run tests starting at this number"
+    echo "    -i               install packages for versions specified by -v"
+    echo "    -M               don't mount tmpfses, run in the host system"
+    echo "    -s               start a shell in the testbed on failure"
+    echo "    -u 'umask ...'   umasks to run testsuite with [default: 077]"
+    echo "    -v 'version ...' PostgreSQL versions to test [default: client versions installed]"
+    echo "    -V               debug output"
+    exit ${1:-0}
+}
+
+# option parsing
+while getopts "Dhf:iMsu:v:V" opt ; do
+    case $opt in
+        D) DROP_ALL_CLUSTERS=1 ;;
+        f) FROM="$OPTARG" ;;
+        i) INSTALL=1 ;;
+        h) help ;;
+        M) export NO_TMPFS=1 ;;
+        s) export FAILURE="shell" ;;
+        u) PG_UMASKS="$OPTARG" ;;
+        v) export PG_VERSIONS="$OPTARG" ;; # used in t/TestLib.pm
+        V) VERBOSE=1 ;;
+        *) help 1 ;;
+    esac
+done
+
+if [ "$(id -u)" != 0 ]; then
+    echo "Error: this test suite needs to be run as root" >&2
+    exit 1
+fi
+
+# install packages for versions specified by -v
+# needs network for apt, so run before unshare
+if [ "${INSTALL:-}" ] && [ -z "${UNSHARED:-}" ]; then
+    . /etc/os-release
+    case $ID in
+        debian|ubuntu)
+            for v in $PG_VERSIONS; do
+                case $v in 8.*|9.*|10|11)
+                    [ "$(perl -I. -le 'use PgCommon; print $PgCommon::have_python2')" = "1" ] && PYTHON2_PACKAGE=postgresql-plpython-$v
+                    ;;
+                esac
+                apt-get install -y \
+                    postgresql-contrib-$v \
+                    postgresql-plperl-$v \
+                    ${PYTHON2_PACKAGE:-} \
+                    $(dpkg --compare-versions $v ge 9.1 && echo postgresql-plpython3-$v) \
+                    postgresql-pltcl-$v \
+                    postgresql-server-dev-$v
+            done
+            apt-get install -y \
+                debhelper \
+                libecpg-dev \
+                procps systemd \
+                netcat-openbsd \
+                hunspell-en-us \
+                gcc
+        ;;
+        redhat|centos)
+            for v in $PG_VERSIONS; do
+                vv=$(echo $v | tr -d .)
+                yum install -y \
+                    postgresql$vv-contrib \
+                    postgresql$vv-plperl \
+                    postgresql$vv-plpython3 \
+                    postgresql$vv-pltcl \
+                    postgresql$vv-devel
+            done
+            yum install -y \
+                nmap-ncat \
+                perl-Test-Simple perl-Time-HiRes \
+                gcc
+        ;;
+        *)
+            echo "Unknown distribution ID $ID in /etc/os-release"
+            exit 1
+        ;;
+    esac
+fi
+
+# shift away args
+shift $(($OPTIND - 1))
+
+# stop currently running clusters
+if [ -d /run/systemd/system ] ; then
+    # stop postgresql@* explicitly (#759725)
+    systemctl stop postgresql "postgresql@*" "pg_receivewal@*"
+else
+    service postgresql stop
+fi
+
+# drop all existing clusters if the user requested it
+if [ "${DROP_ALL_CLUSTERS:-}" ]; then
+    pg_lsclusters -h | while read ver cluster rest; do
+        pg_dropcluster $ver $cluster
+    done
+fi
+
+# set up test directories
+dirs="/etc/postgresql /var/lib/postgresql /var/log/postgresql /var/run/postgresql /var/backups/postgresql"
+
+if [ -z "${NO_TMPFS:-}" ]; then
+    # clean up after us
+    cleanup () {
+        set +e
+        umount -l $dirs
+        sed -i -e '/# by pg-testsuite/d' /etc/postgresql-common/createcluster.conf
+        ./pg_updateaptconfig
+        systemctl daemon-reload 2> /dev/null || : # poke generator to handle the system's clusters again
+    }
+    trap "cleanup" 0 HUP INT QUIT ILL ABRT PIPE TERM
+
+    for d in $dirs; do
+        mkdir -p $d
+        mount -t tmpfs tmpfs $d
+    done
+
+    chown postgres:postgres     /etc/postgresql ; chmod  755     /etc/postgresql
+    chown postgres:postgres /var/lib/postgresql ; chmod  755 /var/lib/postgresql
+    chown     root:postgres /var/log/postgresql ; chmod 1775 /var/log/postgresql
+    chown postgres:postgres /var/run/postgresql ; chmod 2775 /var/run/postgresql /var/backups/postgresql
+fi
+
+if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload # poke generator to forget the system's clusters
+fi
+
+# the RPM packages enable the logging_collector by default, which the testsuite
+# doesn't like. We disable it unconditionally here.
+if ! grep -q logging_collector /etc/postgresql-common/createcluster.conf; then
+    echo "logging_collector = off # by pg-testsuite" >> /etc/postgresql-common/createcluster.conf
+fi
+
+# reset core limit for pg_ctl tests
+ulimit -S -c 0
+
+# set environment
+unset TMPDIR
+unset LC_ALL
+export LANG=en_US.utf8
+
+# set variables which cause taint check errors
+export IFS
+export CDPATH=/usr
+export ENV=/nonexisting
+export BASH_ENV=/nonexisting
+
+if [ $# -eq 0 ]; then
+    set -- $TESTSDIR/*.t
+fi
+
+# dump environment for debugging
+if [ "${VERBOSE:-}" ]; then
+    echo "Environment:"
+    env | sort
+    echo "Mounts:"
+    cat /proc/mounts
+    echo "Namespaces:"
+    ls -l /proc/self/ns
+    echo
+fi
+
+for U in $PG_UMASKS; do
+    echo "====== Running all tests with umask $U ======="
+    umask $U
+    for T; do
+        TBASE=${T##*/}
+        [ "${FROM:-}" ] && [ "${TBASE%%_*}" -lt "${FROM:-}" ] && continue
+        echo "### PostgreSQL test $TBASE ###"
+        perl -I. $T || {
+            EXIT=$?
+            FAILED_TESTS="${FAILED_TESTS:-} $T"
+            if [ "${FAILURE:-}" ]; then
+                echo "*** $TBASE failed with status $EXIT, dropping you into a shell in the testbed ***"
+                ${SHELL:-/bin/sh}
+            fi
+        }
+        echo "### End test $TBASE ###"
+        echo
+    done
+done
+
+if [ "${FAILED_TESTS:-}" ]; then
+    echo "Failed tests: $FAILED_TESTS"
+    echo
+fi
+
+exit ${EXIT:-0}
